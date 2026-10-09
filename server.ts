@@ -795,6 +795,35 @@ app.post("/api/organisations", requireAuth, rateLimit(15, 60000), async (req: Au
       isActive: true,
     });
 
+    // Store the optional organisation role on the user's Talent Passport as an extra credential
+    await db.insert(passportRecords).values({
+      userId,
+      recordCategory: "Organisation Role",
+      title: `${sanitizeText(roleTitle || "Authorised Representative", 100)} — ${org.name}`,
+      issuerOrOrganisationName: org.name,
+      organisationId: org.id,
+      startDate: new Date().toISOString().slice(0, 7),
+      endDate: "Present",
+      confirmedHours: 0,
+      skillsDemonstrated: Array.isArray(servicesOrProgrammes)
+        ? servicesOrProgrammes.map((s) => sanitizeText(s, 80))
+        : ["Organisation Representation"],
+      publicSummary: sanitizeText(
+        description || `Optional organisation role representing ${org.name} (${org.orgType}).`,
+        600
+      ),
+      evidenceReference: `ORG-ROLE-${org.id}`,
+      evidenceStatus: "Self-declared",
+      verificationHistory: [
+        {
+          date: new Date().toISOString().slice(0, 10),
+          actor: req.authUser!.name,
+          action: "Added optional organisation role credential to Talent Passport",
+          status: "Self-declared",
+        },
+      ],
+    });
+
     await logAudit(
       userId,
       req.authUser!.name,
@@ -1412,21 +1441,48 @@ app.post("/api/passport/:id/verify", requireAuth, async (req: AuthRequest, res) 
       ? [...record.verificationHistory]
       : [];
 
-    if (action === "submit_for_review") {
+    if (action === "submit_for_review" || action === "self_declare") {
       if (record.userId !== actorId) {
-        return res.status(403).json({ error: "Only the record owner can submit it for review." });
+        return res
+          .status(403)
+          .json({ error: "Only the record owner can submit or self-declare it." });
       }
+      const nextEvStatus =
+        action === "submit_for_review" ? "Submitted for review" : "Self-declared";
+      const nextSkills = Array.isArray(skillsDemonstrated)
+        ? skillsDemonstrated.map((s: string) => sanitizeText(s, 80)).filter(Boolean)
+        : record.skillsDemonstrated;
+      const nextSummary =
+        req.body.publicSummary !== undefined
+          ? sanitizeText(req.body.publicSummary, 800)
+          : record.publicSummary;
+      const nextOrgId =
+        req.body.organisationId !== undefined && req.body.organisationId !== null
+          ? Number(req.body.organisationId) || null
+          : record.organisationId;
+      const nextIssuer =
+        req.body.issuerOrOrganisationName !== undefined
+          ? sanitizeText(req.body.issuerOrOrganisationName, 150)
+          : record.issuerOrOrganisationName;
+
       history.push({
         date: new Date().toISOString().slice(0, 10),
         actor: req.authUser!.name,
-        action: "Submitted record for organisation verification",
-        status: "Submitted for review",
+        action:
+          action === "submit_for_review"
+            ? "Submitted record for organisation verification"
+            : "Updated self-declared skill verification record",
+        status: nextEvStatus,
         note: sanitizeText(note || "", 300),
       });
       const updated = await db
         .update(passportRecords)
         .set({
-          evidenceStatus: "Submitted for review",
+          evidenceStatus: nextEvStatus,
+          skillsDemonstrated: nextSkills,
+          publicSummary: nextSummary,
+          organisationId: nextOrgId,
+          issuerOrOrganisationName: nextIssuer,
           verificationHistory: history,
           updatedAt: new Date(),
         })
